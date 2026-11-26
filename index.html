@@ -486,14 +486,13 @@ function pocketInfo(a, m) {
   const saldo = saldoAkun(a);
   const keluar = keluarBulan(a, m);
   if (a.fungsi === "Jajan") {
-    const budget = Number(a.budgetBulanan) || 0;
-    const sisa = budget - keluar;
-    const pct = budget > 0 ? keluar / budget : 0;
+    const rutin = Number(a.setoranRutin) || 0;
+    const setoran = setoranBulan(a, m);
+    const pct = rutin > 0 ? setoran / rutin : 0;
     let st = ["good", "✅", "Aman"];
-    if (budget <= 0) st = ["", "ℹ️", "Isi budget bulanan di tab Akun"];
-    else if (sisa < 0) st = ["critical", "🔴", "Over budget " + rp(-sisa)];
-    else if (sisa < budget * 0.2) st = ["warning", "🟡", "Tinggal sedikit"];
-    return { saldo, keluar, budget, sisa, pct, st };
+    if (saldo < 0) st = ["critical", "🔴", "Saldo minus"];
+    else if (rutin > 0 && setoran < rutin) st = ["", "ℹ️", "Belum dialokasikan " + rp(rutin - setoran)];
+    return { saldo, keluar, rutin, setoran, pct, st };
   }
   if (a.fungsi === "Liburan" || a.fungsi === "Tabungan") {
     const target = Number(a.target) || 0;
@@ -544,7 +543,7 @@ function viewDashboard() {
 
   let h = "";
   if (isEmpty) {
-    h += `<div class="banner"><p><b>Mulai di sini:</b> isi saldo awal tiap rekening & pocket, atur budget jajan dan target liburan/tabungan di tab <b>Akun & Pocket</b>, lalu catat transaksi dengan tombol <b>+ Transaksi</b>.</p><button class="btn primary" data-go="akun">Atur akun</button></div>`;
+    h += `<div class="banner"><p><b>Mulai di sini:</b> isi saldo awal tiap rekening & pocket, atur setoran rutin dan target liburan/tabungan di tab <b>Akun & Pocket</b>, lalu catat transaksi dengan tombol <b>+ Transaksi</b>.</p><button class="btn primary" data-go="akun">Atur akun</button></div>`;
   }
   h += `<div class="grid g4">
     ${stat("Total saldo", rp(totalSaldo))}
@@ -608,11 +607,10 @@ function pocketCard(a, m) {
   const p = pocketInfo(a, m);
   let body = "";
   if (a.fungsi === "Jajan") {
-    body = `<div class="big ${p.sisa < 0 ? "neg" : ""}">${rp(p.sisa)}</div><div class="muted" style="font-size:12px">sisa jajan bulan ini</div>
-      <div class="progress" data-tip="Terpakai ${rp(p.keluar)} dari ${rp(p.budget)} (${Math.round(p.pct * 100)}%)"><div class="${p.st[0]}" style="width:${Math.min(100, p.pct * 100)}%"></div></div>
-      <div class="kv"><span>Budget</span><span class="num">${rp(p.budget)}</span></div>
-      <div class="kv"><span>Terpakai</span><span class="num">${rp(p.keluar)}</span></div>
-      <div class="kv"><span>Saldo pocket</span><span class="num">${rp(p.saldo)}</span></div>`;
+    body = `<div class="big ${p.saldo < 0 ? "neg" : ""}">${rp(p.saldo)}</div><div class="muted" style="font-size:12px">saldo pocket</div>
+      <div class="progress" data-tip="Dialokasikan ${rp(p.setoran)} dari ${rp(p.rutin)} (${Math.round(p.pct * 100)}%)"><div class="${p.pct >= 1 ? "good" : ""}" style="width:${Math.min(100, p.pct * 100)}%"></div></div>
+      <div class="kv"><span>Setoran bulan ini</span><span class="num">${rp(p.setoran)}</span></div>
+      <div class="kv"><span>Setoran rutin</span><span class="num">${rp(p.rutin)}</span></div>`;
   } else if (a.fungsi === "Liburan" || a.fungsi === "Tabungan") {
     body = `<div class="big">${rp(p.saldo)}</div><div class="muted" style="font-size:12px">dari target ${rp(p.target)}</div>
       <div class="progress" data-tip="${Math.round(p.pct * 100)}% dari target"><div class="${p.pct >= 1 ? "good" : ""}" style="width:${Math.min(100, p.pct * 100)}%"></div></div>
@@ -724,10 +722,10 @@ function viewTransfer() {
 
 /* ============ Akun ============ */
 function viewAkun() {
-  return `<div class="section-title" style="margin-top:0"><div><h2>Akun & Pocket</h2><div class="hint">Tiap pocket Jago dihitung sebagai akun sendiri. Fungsi menentukan cara pocket dipantau: Jajan → budget bulanan, Liburan → target + tenggat, Tabungan → target & peringatan kalau terpakai.</div></div><button class="btn primary" id="addAkun">+ Akun</button></div>
-    <div class="card"><div class="table-wrap"><table><thead><tr><th>Nama</th><th>Bank</th><th>Fungsi</th><th class="r">Saldo awal</th><th class="r">Setoran rutin</th><th class="r">Budget/bulan</th><th class="r">Target</th><th>Tenggat</th><th class="r">Saldo sekarang</th><th></th></tr></thead><tbody>
+  return `<div class="section-title" style="margin-top:0"><div><h2>Akun & Pocket</h2><div class="hint">Tiap pocket Jago dihitung sebagai akun sendiri. Fungsi menentukan cara pocket dipantau: Jajan → saldo & alokasi, Liburan → target + tenggat, Tabungan → target & peringatan kalau terpakai.</div></div><button class="btn primary" id="addAkun">+ Akun</button></div>
+    <div class="card"><div class="table-wrap"><table><thead><tr><th>Nama</th><th>Bank</th><th>Fungsi</th><th class="r">Saldo awal</th><th class="r">Setoran rutin</th><th class="r">Target</th><th>Tenggat</th><th class="r">Saldo sekarang</th><th></th></tr></thead><tbody>
     ${S.akun.map(a => `<tr><td>${esc(a.nama)}</td><td>${esc(a.bank)}</td><td><span class="pill">${esc(a.fungsi)}</span></td><td class="r num">${rp(a.saldoAwal)}</td><td class="r num">${a.fungsi === "Utama" ? "—" : rp(a.setoranRutin)}</td>
-      <td class="r num">${a.fungsi === "Jajan" ? rp(a.budgetBulanan) : "—"}</td><td class="r num">${a.fungsi === "Liburan" || a.fungsi === "Tabungan" ? rp(a.target) : "—"}</td><td>${a.fungsi === "Liburan" ? dateLabel(a.tenggat) || "—" : "—"}</td>
+      <td class="r num">${a.fungsi === "Liburan" || a.fungsi === "Tabungan" ? rp(a.target) : "—"}</td><td>${a.fungsi === "Liburan" ? dateLabel(a.tenggat) || "—" : "—"}</td>
       <td class="r num"><b>${rp(saldoAkun(a))}</b></td><td class="r" style="white-space:nowrap"><button class="btn small" data-edit-akun="${a.id}">Ubah</button> <button class="btn small danger" data-del-akun="${a.id}">Hapus</button></td></tr>`).join("")}
     </tbody></table></div></div>
     <p class="hint">Saldo sekarang = saldo awal + pemasukan − pengeluaran + transfer masuk − transfer keluar. Kalau beda dengan saldo di aplikasi bank, cek transaksi yang belum tercatat.</p>`;
@@ -744,7 +742,7 @@ function viewKategori() {
       <td class="r" style="white-space:nowrap"><button class="btn small" data-edit-kat="${k.id}">Ubah</button> <button class="btn small danger" data-del-kat="${k.id}">Hapus</button></td></tr>`;
   };
   const tbl = (tipe) => `<table><thead><tr><th>${tipe}</th><th class="r">Budget/bulan</th><th class="r">${tipe === "Pemasukan" ? "Masuk" : "Terpakai"} · ${monthShort(m)}</th><th class="r">Sisa</th><th></th></tr></thead><tbody>${S.kategori.filter(k => k.tipe === tipe).map(row).join("")}</tbody></table>`;
-  return `<div class="section-title" style="margin-top:0"><div><h2>Kategori & Budget</h2><div class="hint">Budget kategori itu opsional. Budget jajan utama sudah diatur lewat pocket Jajan.</div></div><button class="btn primary" id="addKat">+ Kategori</button></div>
+  return `<div class="section-title" style="margin-top:0"><div><h2>Kategori & Budget</h2><div class="hint">Budget kategori itu opsional.</div></div><button class="btn primary" id="addKat">+ Kategori</button></div>
     <div class="grid g2"><div class="card table-wrap">${tbl("Pengeluaran")}</div><div class="card table-wrap">${tbl("Pemasukan")}</div></div>`;
 }
 
@@ -824,11 +822,10 @@ function formAkun(a) {
     <label>Saldo awal (Rp)<input type="text" inputmode="numeric" name="saldoAwal" data-rp value="${rpVal(a.saldoAwal)}" placeholder="0"></label>
     <span class="hint">Saldo awal = saldo di aplikasi bank saat kamu mulai mencatat.</span>
     <label data-f="Jajan Liburan Tabungan Lainnya">Setoran rutin tiap gajian (Rp)<input type="text" inputmode="numeric" name="setoranRutin" data-rp value="${rpVal(a.setoranRutin)}" placeholder="0"></label>
-    <label data-f="Jajan">Budget jajan per bulan (Rp)<input type="text" inputmode="numeric" name="budgetBulanan" data-rp value="${rpVal(a.budgetBulanan)}" placeholder="0"></label>
     <label data-f="Liburan Tabungan">Target (Rp)<input type="text" inputmode="numeric" name="target" data-rp value="${rpVal(a.target)}" placeholder="0"></label>
     <label data-f="Liburan">Tenggat (tanggal berangkat)<input type="date" name="tenggat" value="${a.tenggat || ""}"></label>`,
     (fd) => {
-      const data = { nama: fd.nama.trim(), bank: fd.bank.trim(), fungsi: fd.fungsi, saldoAwal: parseRp(fd.saldoAwal), setoranRutin: parseRp(fd.setoranRutin), budgetBulanan: parseRp(fd.budgetBulanan), target: parseRp(fd.target), tenggat: fd.tenggat || "" };
+      const data = { nama: fd.nama.trim(), bank: fd.bank.trim(), fungsi: fd.fungsi, saldoAwal: parseRp(fd.saldoAwal), setoranRutin: parseRp(fd.setoranRutin), target: parseRp(fd.target), tenggat: fd.tenggat || "" };
       if (edit) Object.assign(a, data); else S.akun.push({ id: uid(), ...data });
     });
   const sel = document.getElementById("fFungsi");
