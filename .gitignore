@@ -1,0 +1,5 @@
+# Data keuangan pribadi: jangan pernah di-commit
+*.json
+data/
+backup/
+.DS_Store
