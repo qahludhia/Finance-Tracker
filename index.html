@@ -79,6 +79,8 @@ main { max-width: 1120px; margin: 0 auto; padding: 20px; padding-bottom: 96px; }
 .storage { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); display: inline-block; }
 .dot.warn { background: var(--warning); }
+.dot.err { background: var(--critical); }
+.dot.busy { background: var(--series-1); }
 input[type=month], input[type=date], input[type=text], input[type=search], select {
   border: 1px solid var(--border); background: var(--surface); padding: 7px 10px; border-radius: 8px; min-width: 0;
 }
@@ -158,6 +160,7 @@ svg text { fill: var(--text-2); font-size: 11px; }
     <div class="brand">Keuanganku<small>Pencatat keuangan pribadi · data tersimpan di perangkatmu</small></div>
     <label class="muted" style="font-size:12px">Bulan <input type="month" id="month"></label>
     <span class="storage" id="storageStatus"></span>
+    <button class="btn" id="btnGitHub" title="Sinkron data ke repo GitHub privat supaya bisa dibuka dari perangkat lain">Sinkron GitHub</button>
     <button class="btn" id="btnFile" title="Simpan otomatis ke file .json di komputermu">File data…</button>
     <button class="btn" id="btnExport">Ekspor</button>
     <button class="btn" id="btnImport">Impor</button>
@@ -216,8 +219,12 @@ function save() {
   S.updatedAt = Date.now();
   try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) { toast("Gagal menyimpan di browser: " + e.message); }
   if (fileHandle) { clearTimeout(saveTimer); saveTimer = setTimeout(writeFile, 400); }
+  if (gh) { clearTimeout(ghTimer); ghTimer = setTimeout(ghSync, 1200); }
   renderStorage();
 }
+const persistLocal = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch {} };
+/* Catat id yang dihapus supaya penggabungan data antar perangkat tidak memunculkannya lagi */
+const tandaiHapus = (id) => { if (!Array.isArray(S.hapus)) S.hapus = []; S.hapus.push(id); };
 async function writeFile() {
   if (!fileHandle) return;
   try {
@@ -262,14 +269,173 @@ async function connectHandle(h, preferFile) {
 
 function renderStorage() {
   const el = document.getElementById("storageStatus");
+  let h = "";
   if (fileHandle) {
-    el.innerHTML = `<span class="dot"></span>File: ${esc(fileHandle.name)}${lastFileSave ? " · " + lastFileSave.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : ""}`;
+    h = `<span class="dot"></span>File: ${esc(fileHandle.name)}${lastFileSave ? " · " + lastFileSave.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : ""}`;
   } else if (rememberedHandle) {
-    el.innerHTML = `<span class="dot warn"></span><button class="btn small" id="reconnect">Sambungkan ulang ${esc(rememberedHandle.name)}</button>`;
-    document.getElementById("reconnect").onclick = () => connectHandle(rememberedHandle, false).catch(e => toast(e.message));
-  } else {
-    el.innerHTML = `<span class="dot warn"></span>Tersimpan di browser saja`;
+    h = `<span class="dot warn"></span><button class="btn small" id="reconnect">Sambungkan ulang ${esc(rememberedHandle.name)}</button>`;
+  } else if (!gh) {
+    h = `<span class="dot warn"></span>Tersimpan di browser saja`;
   }
+  if (gh) {
+    const jam = ghLast ? " " + ghLast.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "";
+    const [cls, txt] = ghState === "busy" ? ["busy", "menyinkron…"]
+      : ghState === "err" ? ["err", "gagal (" + ghMsg + ")"]
+      : ghState === "ok" ? ((S.updatedAt || 0) !== (gh.syncedAt || 0) ? ["warn", "menunggu sinkron"] : ["", "tersinkron" + jam])
+      : ["warn", "belum sinkron"];
+    h += `<button class="btn small" id="ghNow" title="Klik untuk sinkron sekarang"><span class="dot ${cls}"></span> GitHub: ${esc(txt)}</button>`;
+  }
+  el.innerHTML = h;
+  const rc = document.getElementById("reconnect");
+  if (rc) rc.onclick = () => connectHandle(rememberedHandle, false).catch(e => toast(e.message));
+  const gn = document.getElementById("ghNow");
+  if (gn) gn.onclick = () => ghSync(true);
+}
+
+/* ============ Sinkron GitHub (repo privat) ============ */
+const GH_KEY = "keuanganku-gh"; /* {owner, repo, path, token, sha, syncedAt}: hanya di browser ini, tidak ikut ekspor */
+let gh = null;
+try { gh = JSON.parse(localStorage.getItem(GH_KEY)) || null; } catch { gh = null; }
+let ghBusy = false, ghAgain = false, ghTimer = null, ghState = "idle", ghMsg = "", ghLast = null, ghLastTry = 0;
+const ghSaveCfg = () => { try { localStorage.setItem(GH_KEY, JSON.stringify(gh)); } catch {} };
+
+function b64enc(str) {
+  const bytes = new TextEncoder().encode(str); let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+const b64dec = (b) => new TextDecoder().decode(Uint8Array.from(atob(b.replace(/\s/g, "")), c => c.charCodeAt(0)));
+
+function ghFetch(url, opts = {}, cfg = gh) {
+  return fetch("https://api.github.com" + url, {
+    ...opts, cache: "no-store",
+    headers: { Authorization: "Bearer " + cfg.token, Accept: "application/vnd.github+json", ...(opts.headers || {}) },
+  });
+}
+function ghErr(r, body) {
+  if (r.status === 401) return "token salah atau kedaluwarsa";
+  if (r.status === 403) return /rate limit/i.test(body?.message || "") ? "batas akses GitHub tercapai, coba lagi nanti" : "token tidak punya izin tulis ke repo ini";
+  if (r.status === 404) return "repo tidak ditemukan atau token tidak punya akses";
+  return body?.message || "HTTP " + r.status;
+}
+const ghRepoUrl = (c = gh) => `/repos/${encodeURIComponent(c.owner)}/${encodeURIComponent(c.repo)}`;
+const ghFileUrl = () => ghRepoUrl() + "/contents/" + gh.path.split("/").map(encodeURIComponent).join("/");
+
+async function ghGet() {
+  const r = await ghFetch(ghFileUrl());
+  if (r.status === 404) return null;
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(ghErr(r, j));
+  let text;
+  if (j.encoding === "base64" && j.content) text = b64dec(j.content);
+  else { /* file > 1 MB: ambil isi mentahnya */
+    const r2 = await ghFetch(ghFileUrl(), { headers: { Accept: "application/vnd.github.raw" } });
+    if (!r2.ok) throw new Error(ghErr(r2));
+    text = await r2.text();
+  }
+  let data = null;
+  try { data = text.trim() ? JSON.parse(text) : null; } catch { data = null; }
+  return { sha: j.sha, data: validState(data) ? data : null };
+}
+/* true = berhasil; false = file di GitHub berubah duluan (sha basi), perlu diulang */
+async function ghPut(sha) {
+  const body = { message: "Update data Keuanganku", content: b64enc(JSON.stringify(S, null, 2)) };
+  if (sha) body.sha = sha;
+  const r = await ghFetch(ghFileUrl(), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => null);
+  if (r.status === 409 || r.status === 422) return false;
+  if (!r.ok) throw new Error(ghErr(r, j));
+  gh.sha = j.content.sha; gh.syncedAt = S.updatedAt; ghSaveCfg();
+  return true;
+}
+
+/* Gabung per id: item dari kedua sisi dipertahankan, versi lokal menang kalau id sama, yang sudah dihapus dibuang */
+function mergeState(local, remote) {
+  const hapus = [...new Set([...(local.hapus || []), ...(remote.hapus || [])])];
+  const del = new Set(hapus);
+  const m = (a, b) => { const map = new Map(); for (const x of b || []) map.set(x.id, x); for (const x of a || []) map.set(x.id, x); return [...map.values()].filter(x => !del.has(x.id)); };
+  return { ...remote, ...local, akun: m(local.akun, remote.akun), kategori: m(local.kategori, remote.kategori),
+    transaksi: m(local.transaksi, remote.transaksi), transfer: m(local.transfer, remote.transfer), hapus, updatedAt: Date.now() };
+}
+function adoptRemote(data, sha) {
+  S = data; if (!Array.isArray(S.hapus)) S.hapus = [];
+  persistLocal();
+  gh.sha = sha; gh.syncedAt = S.updatedAt; ghSaveCfg();
+  if (fileHandle) { clearTimeout(saveTimer); saveTimer = setTimeout(writeFile, 400); }
+  render();
+}
+
+async function ghSync(manual) {
+  if (!gh) return;
+  if (ghBusy || dlg.open) { ghAgain = true; return; } /* jangan ganti data saat form sedang terbuka */
+  clearTimeout(ghTimer);
+  ghBusy = true; ghState = "busy"; ghLastTry = Date.now(); renderStorage();
+  let info = "";
+  try {
+    let done = false;
+    for (let i = 0; i < 4 && !done; i++) {
+      const remote = await ghGet();
+      const localChanged = (S.updatedAt || 0) !== (gh.syncedAt || 0);
+      if (!remote || !remote.data) { done = await ghPut(remote?.sha); continue; }   /* belum ada file di GitHub */
+      if (remote.sha === gh.sha) { done = !localChanged || await ghPut(remote.sha); continue; } /* GitHub tidak berubah */
+      /* GitHub berubah dari perangkat lain */
+      if (!gh.sha && !(S.transaksi.length === 0 && S.transfer.length === 0)) {
+        const pakaiGitHub = confirm("Di GitHub sudah ada data, dan browser ini juga punya data.\n\nOK = pakai data dari GitHub (data di browser ini diganti)\nBatal = gabungkan keduanya");
+        if (pakaiGitHub) { adoptRemote(remote.data, remote.sha); done = true; continue; }
+      } else if (!localChanged || !gh.sha) {
+        adoptRemote(remote.data, remote.sha); info = "Data terbaru diambil dari GitHub"; done = true; continue;
+      }
+      S = mergeState(S, remote.data); persistLocal(); render();
+      done = await ghPut(remote.sha);
+      if (done) info = "Data digabung dengan perubahan dari perangkat lain";
+    }
+    if (!done) throw new Error("data terus berubah, coba lagi");
+    ghState = "ok"; ghLast = new Date(); ghMsg = "";
+    if (info || manual) toast(info || "Tersinkron dengan GitHub");
+  } catch (e) {
+    ghState = "err"; ghMsg = e instanceof TypeError ? "offline / tidak bisa menghubungi GitHub" : e.message;
+    if (manual) toast("Sinkron gagal: " + ghMsg);
+  }
+  ghBusy = false; renderStorage();
+  if (ghAgain) { ghAgain = false; setTimeout(ghSync, 300); }
+}
+function ghSyncSoon() { if (gh && Date.now() - ghLastTry > 10000) ghSync(); }
+
+async function ghConnect(cfg) {
+  try {
+    const r = await ghFetch(ghRepoUrl(cfg), {}, cfg);
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(ghErr(r, j));
+    if (!j.private) throw new Error("repo " + cfg.owner + "/" + cfg.repo + " itu publik. Pakai repo privat supaya data keuanganmu tidak bisa dibaca orang lain");
+    const sama = gh && gh.owner === cfg.owner && gh.repo === cfg.repo && gh.path === cfg.path;
+    gh = { ...cfg, sha: sama ? gh.sha : null, syncedAt: sama ? gh.syncedAt : null };
+    ghSaveCfg();
+    await ghSync(true);
+  } catch (e) {
+    toast("Gagal menyambung: " + (e instanceof TypeError ? "tidak bisa menghubungi GitHub" : e.message));
+  }
+  renderStorage();
+}
+function formGitHub() {
+  const c = gh || { owner: location.hostname.endsWith(".github.io") ? location.hostname.split(".")[0] : "", repo: "keuanganku-data", path: "data.json" };
+  openForm(`<h3>Sinkron GitHub</h3>
+    <p class="hint" style="margin:0">Data disimpan otomatis ke file di repo GitHub <b>privat</b>, jadi bisa dibuka dari laptop, komputer kantor, atau HP. Token hanya disimpan di browser ini dan tidak ikut ekspor. Cara membuat repo & token ada di README.</p>
+    <label>Username GitHub (pemilik repo)<input type="text" name="owner" value="${esc(c.owner)}" required autocomplete="off" autocapitalize="off"></label>
+    <label>Nama repo privat<input type="text" name="repo" value="${esc(c.repo)}" required autocomplete="off" autocapitalize="off"></label>
+    <label>Nama file<input type="text" name="path" value="${esc(c.path)}" required autocomplete="off" autocapitalize="off"></label>
+    <label>Token (fine-grained, izin Contents: Read and write)<input type="password" name="token" ${gh ? 'placeholder="(sudah tersimpan, kosongkan kalau tidak diganti)"' : 'placeholder="github_pat_…" required'} autocomplete="off"></label>
+    ${gh ? `<button type="button" class="btn danger" id="ghOff">Putuskan sinkron di browser ini</button>` : ""}`,
+    (fd) => {
+      const cfg = { owner: fd.owner.trim(), repo: fd.repo.trim().replace(/\.git$/, ""), path: fd.path.trim().replace(/^\/+/, "") || "data.json", token: fd.token.trim() || gh?.token || "" };
+      if (!cfg.token) return "Token wajib diisi";
+      setTimeout(() => ghConnect(cfg), 0);
+    });
+  const off = document.getElementById("ghOff");
+  if (off) off.onclick = () => {
+    if (!confirm("Putuskan sinkron GitHub di browser ini? Token dihapus dari browser ini. Data di browser dan di GitHub tidak dihapus.")) return;
+    gh = null; try { localStorage.removeItem(GH_KEY); } catch {}
+    ghState = "idle"; dlg.close(); renderStorage(); toast("Sinkron GitHub diputus di browser ini");
+  };
 }
 
 /* ============ Util ============ */
@@ -694,16 +860,16 @@ document.getElementById("view").addEventListener("click", (e) => {
   if (d.editTf) return formTransfer(byId(S.transfer, d.editTf));
   if (d.editAkun) return formAkun(byId(S.akun, d.editAkun));
   if (d.editKat) return formKat(byId(S.kategori, d.editKat));
-  if (d.delTrx && confirm("Hapus transaksi ini?")) { S.transaksi = S.transaksi.filter(x => x.id !== d.delTrx); save(); render(); }
-  if (d.delTf && confirm("Hapus transfer ini?")) { S.transfer = S.transfer.filter(x => x.id !== d.delTf); save(); render(); }
+  if (d.delTrx && confirm("Hapus transaksi ini?")) { S.transaksi = S.transaksi.filter(x => x.id !== d.delTrx); tandaiHapus(d.delTrx); save(); render(); }
+  if (d.delTf && confirm("Hapus transfer ini?")) { S.transfer = S.transfer.filter(x => x.id !== d.delTf); tandaiHapus(d.delTf); save(); render(); }
   if (d.delAkun) {
     const used = S.transaksi.some(t => t.akunId === d.delAkun) || S.transfer.some(t => t.dariId === d.delAkun || t.keId === d.delAkun);
     if (used) return toast("Akun ini masih dipakai transaksi/transfer, jadi tidak bisa dihapus");
-    if (confirm("Hapus akun ini?")) { S.akun = S.akun.filter(x => x.id !== d.delAkun); save(); render(); }
+    if (confirm("Hapus akun ini?")) { S.akun = S.akun.filter(x => x.id !== d.delAkun); tandaiHapus(d.delAkun); save(); render(); }
   }
   if (d.delKat) {
     if (S.transaksi.some(t => t.kategoriId === d.delKat)) return toast("Kategori ini masih dipakai transaksi, jadi tidak bisa dihapus");
-    if (confirm("Hapus kategori ini?")) { S.kategori = S.kategori.filter(x => x.id !== d.delKat); save(); render(); }
+    if (confirm("Hapus kategori ini?")) { S.kategori = S.kategori.filter(x => x.id !== d.delKat); tandaiHapus(d.delKat); save(); render(); }
   }
 });
 document.getElementById("fab").onclick = () => formTrx();
@@ -763,10 +929,22 @@ document.getElementById("btnFile").onclick = () => {
 };
 if (!hasFS) document.getElementById("btnFile").title = "Tersedia di Chrome/Edge desktop";
 
+/* Sinkron GitHub: tombol & pemicu otomatis */
+document.getElementById("btnGitHub").onclick = formGitHub;
+dlg.addEventListener("close", () => { if (ghAgain) { ghAgain = false; setTimeout(ghSync, 300); } });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") ghSyncSoon(); });
+window.addEventListener("focus", ghSyncSoon);
+window.addEventListener("online", () => gh && ghSync());
+/* Peringatan kalau halaman ditutup sebelum perubahan terkirim ke GitHub */
+window.addEventListener("beforeunload", (e) => {
+  if (gh && (ghBusy || (S.updatedAt || 0) !== (gh.syncedAt || 0))) { e.preventDefault(); e.returnValue = ""; }
+});
+
 /* Mulai */
 (async () => {
   if (hasFS) { try { rememberedHandle = await idbGet("handle") || null; } catch {} }
   render();
+  if (gh) ghSync();
 })();
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && h !== tab && TABS.some(t => t[0] === h)) { tab = h; render(); } });
 </script>
