@@ -554,7 +554,9 @@ function viewDashboard() {
   </div>`;
 
   h += `<div class="section-title"><h2>Pocket</h2>${utama && adaSetoran ? `<button class="btn primary" id="btnAlokasi">Alokasi gaji dari ${esc(utama.nama)}</button>` : ""}</div>`;
-  h += `<div class="grid g3">${pockets.map(a => pocketCard(a, m)).join("") || `<div class="card muted">Belum ada pocket. Tambahkan di tab Akun & Pocket.</div>`}</div>`;
+  const utamaList = S.akun.filter(a => a.fungsi === "Utama");
+  const nCard = utamaList.length + pockets.length;
+  h += `<div class="grid ${nCard >= 4 ? "g4" : "g3"}">${utamaList.map(a => utamaCard(a, m)).join("")}${pockets.map(a => pocketCard(a, m)).join("") || `<div class="card muted">Belum ada pocket. Tambahkan di tab Akun & Pocket.</div>`}</div>`;
 
   /* saldo per bank */
   const banks = [...new Set(S.akun.map(a => a.bank || "Lainnya"))];
@@ -579,6 +581,28 @@ function viewDashboard() {
   return h;
 }
 const stat = (label, value, cls = "") => `<div class="card stat"><div class="label">${esc(label)}</div><div class="value ${cls}">${value}</div></div>`;
+
+/* Kartu akun utama (rekening gaji): saldo + progres alokasi ke pocket bulan ini */
+function utamaCard(a, m) {
+  const saldo = saldoAkun(a);
+  const masuk = sum(trxIn(m).filter(t => t.akunId === a.id && tipeOf(t) === "Pemasukan"), t => t.jumlah);
+  const keluar = keluarBulan(a, m);
+  const rencana = sum(S.akun.filter(x => x.id !== a.id && x.fungsi !== "Utama"), x => x.setoranRutin);
+  const dialokasi = transferKeluarBulan(a, m);
+  const sisaAlokasi = Math.max(0, rencana - dialokasi);
+  const pct = rencana > 0 ? dialokasi / rencana : 0;
+  let st = ["good", "✅", "Aman"];
+  if (saldo < 0) st = ["critical", "🔴", "Saldo minus"];
+  else if (sisaAlokasi > 0 && saldo < sisaAlokasi) st = ["warning", "🟡", "Saldo kurang " + rp(sisaAlokasi - saldo) + " untuk alokasi"];
+  else if (rencana > 0 && sisaAlokasi > 0) st = ["", "ℹ️", "Belum dialokasikan " + rp(sisaAlokasi)];
+  return `<div class="card pocket"><div class="top"><div><h3>${esc(a.nama)}</h3></div><span class="pill">${esc(a.fungsi)}</span></div>
+    <div class="big ${saldo < 0 ? "neg" : ""}">${rp(saldo)}</div><div class="muted" style="font-size:12px">saldo akun utama</div>
+    <div class="progress" data-tip="Dialokasikan ${rp(dialokasi)} dari ${rp(rencana)} (${Math.round(pct * 100)}%)"><div class="${pct >= 1 ? "good" : ""}" style="width:${Math.min(100, pct * 100)}%"></div></div>
+    <div class="kv"><span>Pemasukan bulan ini</span><span class="num">${rp(masuk)}</span></div>
+    <div class="kv"><span>Pengeluaran bulan ini</span><span class="num">${rp(keluar)}</span></div>
+    <div class="kv"><span>Dialokasikan ke pocket</span><span class="num">${rp(dialokasi)} / ${rp(rencana)}</span></div>
+    <div class="status"><span>${st[1]}</span><span>${esc(st[2])}</span></div></div>`;
+}
 
 function pocketCard(a, m) {
   const p = pocketInfo(a, m);
